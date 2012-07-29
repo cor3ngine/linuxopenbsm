@@ -1,0 +1,373 @@
+diff -uprN -X linux-2.6.26/Documentation/dontdiff linux-2.6.26/init/Kconfig linux-2.6.26-devel/init/Kconfig
+--- linux-2.6.26/init/Kconfig	2008-07-13 23:51:29.000000000 +0200
++++ linux-2.6.26-devel/init/Kconfig	2008-07-29 11:47:42.000000000 +0200
+@@ -234,6 +234,14 @@ config AUDITSYSCALL
+ 	  such as SELinux.  To use audit's filesystem watch feature, please
+ 	  ensure that INOTIFY is configured.
+ 
++config AUDIT_BSM
++	bool "Enable OpenBSM trails format"
++	depends on AUDIT && AUDITSYSCALL && (X86 || UML)
++	help
++	  Enable OpenBSM trails format for system-call auditing
++	  More infos at http://www.trustedbsd.org and
++  	  http://linuxopenbsm.googlecode.com
++
+ config AUDIT_TREE
+ 	def_bool y
+ 	depends on AUDITSYSCALL && INOTIFY
+diff -uprN -X linux-2.6.26/Documentation/dontdiff linux-2.6.26/kernel/audit.c linux-2.6.26-devel/kernel/audit.c
+--- linux-2.6.26/kernel/audit.c	2008-07-13 23:51:29.000000000 +0200
++++ linux-2.6.26-devel/kernel/audit.c	2008-08-01 11:28:29.000000000 +0200
+@@ -132,6 +132,13 @@ static struct task_struct *kauditd_task;
+ static DECLARE_WAIT_QUEUE_HEAD(kauditd_wait);
+ static DECLARE_WAIT_QUEUE_HEAD(audit_backlog_wait);
+ 
++/* AUDIT BSM: used in audit_log_start_bsm*/
++#ifdef AUDIT_BSM
++static DEFINE_SPINLOCK(audit_freelist_bsm_lock);
++static int	audit_freelist_bsm_count;
++static LIST_HEAD(audit_freelist_bsm);
++#endif
++
+ /* Serialize requests from userspace. */
+ static DEFINE_MUTEX(audit_cmd_mutex);
+ 
+@@ -1196,6 +1203,50 @@ struct audit_buffer *audit_log_start(str
+ 	return ab;
+ }
+ 
++/* audit_log_start_bsm - creating the audit_buffer list for BSM 
++ * trails auditing
++ */
++struct audit_buffer *audit_log_start_bsm(gfp_t gfp_mask)
++{
++	unsigned long flags;
++	//struct nlmsghdr *nlh;
++	
++	audit_buffer *ab_bsm = NULL;
++        spin_lock_irqsave(&audit_freelist_bsm_lock, flags);
++        if (!list_empty(&audit_freelist_bsm)) {
++                ab = list_entry(audit_freelist_bsm.next,
++                                struct audit_buffer, list);
++                list_del(&ab_bsm->list);
++                --audit_freelist_bsm_count;
++        }
++        spin_unlock_irqrestore(&audit_freelist_bsm_lock, flags);
++        if (!ab_bsm) {
++	       ab_bsm = kmalloc(sizeof(*ab_bsm), gfp_mask);
++               if (!ab_bsm)
++	       		goto err;
++		}
++	//FIXME: no allocation here because alloc size vary from
++	//trail to trail. Do it in audit_expand_bsm passing the
++	//dimension as argument to the function. The dimension 
++	//should be set in audit_log_exit (kernel/auditsc.c) 
++        //ab_bsm->skb = alloc_skb(AUDIT_BUFSIZ, gfp_mask);
++        //if (!ab_bsm->skb)
++        //        goto err;
++	//FIXME: can we delete all this stuff??
++        /*ab_bsm->ctx = ctx;
++        ab_bsm->gfp_mask = gfp_mask;
++        nlh = (struct nlmsghdr *)skb_put(ab_bsm->skb, NLMSG_SPACE(0));
++        nlh->nlmsg_type = type;
++        nlh->nlmsg_flags = 0;
++        nlh->nlmsg_pid = 0;
++        nlh->nlmsg_seq = 0;*/
++	//-------------
++        return ab_bsm;
++	err:
++	     audit_buffer_free(ab_bsm);
++	     return NULL;
++}
++
+ /**
+  * audit_expand - expand skb in the audit buffer
+  * @ab: audit_buffer
+diff -uprN -X linux-2.6.26/Documentation/dontdiff linux-2.6.26/kernel/audit.h linux-2.6.26-devel/kernel/audit.h
+--- linux-2.6.26/kernel/audit.h	2008-07-13 23:51:29.000000000 +0200
++++ linux-2.6.26-devel/kernel/audit.h	2008-07-29 11:51:43.000000000 +0200
+@@ -29,6 +29,15 @@
+ */
+ #define AUDIT_DEBUG 0
+ 
++/* Only for development
++   0 = OpenBSM is disable
++   1 = OpenBSM is enable
++*/
++#define AUDIT_BSM 1
++
++/* debugging sessions */
++#define BSM_DEBUG 1
++
+ /* At task start time, the audit_state is set in the audit_context using
+    a per-task filter.  At syscall entry, the audit_state is augmented by
+    the syscall filter. */
+diff -uprN -X linux-2.6.26/Documentation/dontdiff linux-2.6.26/kernel/audit_internal.h linux-2.6.26-devel/kernel/audit_internal.h
+--- linux-2.6.26/kernel/audit_internal.h	1970-01-01 01:00:00.000000000 +0100
++++ linux-2.6.26-devel/kernel/audit_internal.h	2008-07-29 18:27:21.000000000 +0200
+@@ -0,0 +1,146 @@
++/*
++ * Copyright (c) 2005 Apple Computer, Inc.
++ * Copyright (c) 2005 SPARTA, Inc.
++ * All rights reserved.
++ * 
++ * This code was developed in part by Robert N. M. Watson, Senior Principal
++ * Scientist, SPARTA, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1.  Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ * 2.  Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ * 3.  Neither the name of Apple Computer, Inc. ("Apple") nor the names of
++ *     its contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE AND ITS CONTRIBUTORS "AS IS" AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL APPLE OR ITS CONTRIBUTORS BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * P4: //depot/projects/trustedbsd/audit3/sys/bsm/audit_internal.h#18
++ * $FreeBSD: src/sys/bsm/audit_internal.h,v 1.8 2007/07/22 12:28:12 rwatson Exp $
++ */
++
++#ifndef _AUDIT_INTERNAL_H
++#define	_AUDIT_INTERNAL_H
++
++#if defined(__linux__) && !defined(__unused)
++#define	__unused
++#endif
++
++/*
++ * audit_internal.h contains private interfaces that are shared by user space
++ * and the kernel for the purposes of assembling audit records.  Applications
++ * should not include this file or use the APIs found within, or it may be
++ * broken with future releases of OpenBSM, which may delete, modify, or
++ * otherwise break these interfaces or the assumptions they rely on.
++ */
++struct au_token {
++	u_char			*t_data;
++	size_t			 len;
++	TAILQ_ENTRY(au_token)	 tokens;
++	};
++
++struct au_record {
++	char			 used;		/* Record currently in use? */
++	int			 desc;		/* Descriptor for record. */
++	TAILQ_HEAD(, au_token)	 token_q;	/* Queue of BSM tokens. */
++	u_char			*data;
++	size_t			 len;
++	LIST_ENTRY(au_record)	 au_rec_q;
++	};
++typedef	struct au_record	au_record_t;
++
++/*
++ *  * We could determined the header and trailer sizes by defining appropriate
++ *   * structures.  We hold off that approach until we have a consistent way of
++ *    * using structures for all tokens.  This is not straightforward since these
++ *     * token structures may contain pointers of whose contents we do not know the
++ *      * size (e.g text tokens).
++ *       */
++#define	AUDIT_HEADER_SIZE	18
++#define	AUDIT_TRAILER_SIZE	7
++
++/*
++ * BSM token streams store fields in big endian byte order, so as to be
++ * portable; when encoding and decoding, we must convert byte orders for
++ * typed values.
++ */
++#define	ADD_U_CHAR(loc, val)						\
++	do {								\
++		*(loc) = (val);						\
++		(loc) += sizeof(u_char);				\
++	} while(0)
++
++
++#define	ADD_U_INT16(loc, val)						\
++	do {								\
++		be16enc((loc), (val));					\
++		(loc) += sizeof(u_int16_t);				\
++	} while(0)
++
++#define	ADD_U_INT32(loc, val)						\
++	do {								\
++		be32enc((loc), (val));					\
++		(loc) += sizeof(u_int32_t);				\
++	} while(0)
++
++#define	ADD_U_INT64(loc, val)						\
++	do {								\
++		be64enc((loc), (val));					\
++		(loc) += sizeof(u_int64_t); 				\
++	} while(0)
++
++#define	ADD_MEM(loc, data, size)					\
++	do {								\
++		memcpy((loc), (data), (size));				\
++		(loc) += size;						\
++	} while(0)
++
++#define	ADD_STRING(loc, data, size)	ADD_MEM(loc, data, size)
++
++/* FIXME: on FreeBSD these are stored into sys/endian.h should we
++ * make a library to store them even on Linux systems?
++ * Is there already any func that does this work?
++ */
++
++static inline void be16enc(void *pp, uint16_t u)
++{
++       unsigned char *p = (unsigned char *)pp;
++       
++       p[0] = (u >> 8) & 0xff;
++       p[1] = u & 0xff;
++}
++
++static inline void be32enc(void *pp, uint32_t u)
++{
++       unsigned char *p = (unsigned char *)pp;
++       
++       p[0] = (u >> 24) & 0xff;
++       p[1] = (u >> 16) & 0xff;
++       p[2] = (u >> 8) & 0xff;
++       p[3] = u & 0xff;
++}
++
++static inline void be64enc(void *pp, uint64_t u)
++{
++       unsigned char *p = (unsigned char *)pp;
++
++       be32enc(p, u >> 32);
++       be32enc(p + 4,u & 0xffffffff);
++}
++
++
+diff -uprN -X linux-2.6.26/Documentation/dontdiff linux-2.6.26/kernel/auditsc.c linux-2.6.26-devel/kernel/auditsc.c
+--- linux-2.6.26/kernel/auditsc.c	2008-07-13 23:51:29.000000000 +0200
++++ linux-2.6.26-devel/kernel/auditsc.c	2008-08-04 17:09:55.000000000 +0200
+@@ -68,6 +68,11 @@
+ 
+ #include "audit.h"
+ 
++#ifdef AUDIT_BSM
++#include <linux/list.h>
++#include "audit_internal.h"
++#endif
++
+ /* AUDIT_NAMES is the number of slots we reserve in the audit_context
+  * for saving names from getname(). */
+ #define AUDIT_NAMES    20
+@@ -232,6 +237,20 @@ struct audit_context {
+ #endif
+ };
+ 
++#ifdef AUDIT_BSM
++#define AUT_SUBJECT32 0x24
++struct audit_buffer *au_to_subject32(uid_t euid, gid_t egid, uid_t uid, 
++               gid_t gid, pid_t pid, unsigned int sessionid, char* tty);
++
++#define GET_TOKEN_AREA(t, dptr, length) do{            \
++       t = kmalloc(sizeof(struct au_token), GFP_KERNEL);       \
++       t->t_data = kmalloc(length, GFP_KERNEL);        \
++       t->len = length;                                \
++       dptr = t->t_data;                               \
++}while(0)
++
++#endif
++
+ #define ACC_MODE(x) ("\004\002\006\006"[(x)&O_ACCMODE])
+ static inline int open_arg(int flags, int mask)
+ {
+@@ -1163,8 +1182,57 @@ static void audit_log_execve_info(struct
+ 	kfree(buf);
+ }
+ 
++#ifdef AUDIT_BSM
++
++/*FIXME:
++ * token ID            OK: AUT_SUBJECT32
++ * audit ID            probably uid_t target_auid?
++ * effective user ID   OK: euid
++ * effective group ID  OK: egid
++ * real user ID        OK: uid
++ * real group ID       OK: gid
++ * process ID          OK: pid
++ * session ID          OK: sessionid
++ * terminal ID         probably tty? it's a char. In BSM it's ADD_U_INT32
++ */
++
++struct void au_to_subject32(struct *audit_buffer, uid_t euid, gid_t egid, 
++		uid_t uid, gid_t gid, pid_t pid, unsigned int sessionid, char* tty)
++{
++	//struct au_token* t;
++	//devo creare una struct con dentro una lista di skb in modo da
++	//spedirla con una netlink socket tutto questo al posto di au_token
++	u_char *dptr = NULL;
++      	
++	//devo modificare GET_TOKEN_AREA con una chiamata a una func che contenga
++	//alloc_skb su ab_bsm->skb e gestire la lista di skb
++	//GET_TOKEN_AREA(t, dptr, sizeof(u_char) + 9 * sizeof(u_int32_t));
++	
++	ab_bsm->skb = alloc_skb(sizeof(u_char) + 6 * sizeof(u_int32_t),GFP_KERNEL);
++	
++	/*FIXME: add header file with all AUT_*: bsm/audit_record.h */
++	//devo fare una cosa simile a ADD_U_CHAR(ab_bsm->skb,AUT_SUBJECT32)
++	ADD_U_CHAR(dptr,AUT_SUBJECT32);
++	//ADD_U_INT32(dptr, auid);
++	ADD_U_INT32(dptr, euid);
++	ADD_U_INT32(dptr, egid);
++	ADD_U_INT32(dptr, uid);
++	ADD_U_INT32(dptr, gid);
++	ADD_U_INT32(dptr, pid);
++	ADD_U_INT32(dptr, sessionid);
++	//ADD terminal ID 
++	return t;
++}
++
++#endif
++
+ static void audit_log_exit(struct audit_context *context, struct task_struct *tsk)
+ {
++
++#ifdef AUDIT_BSM
++	struct audit_buffer *ab_bsm;
++#endif
++
+ 	int i, call_panic = 0;
+ 	struct audit_buffer *ab;
+ 	struct audit_aux_data *aux;
+@@ -1184,6 +1252,10 @@ static void audit_log_exit(struct audit_
+ 	context->fsgid = tsk->fsgid;
+ 	context->personality = tsk->personality;
+ 
++#ifdef AUDIT_BSM
++	ab_bsm = audit_log_start_bsm(GFP_KERNEL);
++#endif
++
+ 	ab = audit_log_start(context, GFP_KERNEL, AUDIT_SYSCALL);
+ 	if (!ab)
+ 		return;		/* audit_panic has been called */
+@@ -1203,6 +1275,12 @@ static void audit_log_exit(struct audit_
+ 	else
+ 		tty = "(none)";
+ 	read_unlock(&tasklist_lock);
++
++#ifdef AUDIT_BSM
++	au_to_subject32(ab_bsm, context->euid, context->egid, context->uid,
++				context->gid, context->pid, tsk->sessionid, tty);
++#endif
++
+ 	audit_log_format(ab,
+ 		  " a0=%lx a1=%lx a2=%lx a3=%lx items=%d"
+ 		  " ppid=%d pid=%d auid=%u uid=%u gid=%u"

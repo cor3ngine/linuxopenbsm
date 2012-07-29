@@ -1,0 +1,18 @@
+diff -uprN -X linux-2.6.25-rc8-vanilla/Documentation/dontdiff linux-2.6.25-rc8-vanilla/init/Kconfig linux-2.6.25-rc8-devel/init/Kconfig
+--- linux-2.6.25-rc8-vanilla/init/Kconfig	2008-04-05 12:47:59.000000000 +0300
++++ linux-2.6.25-rc8-devel/init/Kconfig	2008-04-05 16:46:30.000000000 +0300
+@@ -233,6 +233,14 @@ config AUDITSYSCALL
+ 	  such as SELinux.  To use audit's filesystem watch feature, please
+ 	  ensure that INOTIFY is configured.
+ 
++config AUDIT_BSM
++	bool "Enable OpenBSM trails format"
++	depends on AUDIT && AUDITSYSCALL && (X86 || UML)
++	help
++	  Enable OpenBSM trails format for system-call auditing
++	  More infos on http://www.trustedbsd.org and 
++	  http://linuxopenbsm.googlecode.com
++
+ config AUDIT_TREE
+ 	def_bool y
+ 	depends on AUDITSYSCALL && INOTIFY

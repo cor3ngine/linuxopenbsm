@@ -1,0 +1,407 @@
+diff -uprN -X linux-2.6.25-rc9-vanilla/Documentation/dontdiff linux-2.6.25-rc9-vanilla/init/Kconfig linux-2.6.25-rc9/init/Kconfig
+--- linux-2.6.25-rc9-vanilla/init/Kconfig	2008-04-16 00:35:34.000000000 +0300
++++ linux-2.6.25-rc9/init/Kconfig	2008-04-16 00:28:43.000000000 +0300
+@@ -233,6 +233,14 @@ config AUDITSYSCALL
+ 	  such as SELinux.  To use audit's filesystem watch feature, please
+ 	  ensure that INOTIFY is configured.
+ 
++config AUDIT_BSM
++	bool "Enable OpenBSM trails format"
++	depends on AUDIT && AUDITSYSCALL && (X86 || UML)
++	help
++	  Enable OpenBSM trails format for system-call auditing
++	  More infos on http://www.trustedbsd.org and 
++	  http://linuxopenbsm.googlecode.com
++
+ config AUDIT_TREE
+ 	def_bool y
+ 	depends on AUDITSYSCALL && INOTIFY
+diff -uprN -X linux-2.6.25-rc9-vanilla/Documentation/dontdiff linux-2.6.25-rc9-vanilla/kernel/audit.h linux-2.6.25-rc9/kernel/audit.h
+--- linux-2.6.25-rc9-vanilla/kernel/audit.h	2008-01-25 00:58:37.000000000 +0200
++++ linux-2.6.25-rc9/kernel/audit.h	2008-04-15 11:25:47.000000000 +0300
+@@ -28,6 +28,10 @@
+    2 = verbose put_count checking
+ */
+ #define AUDIT_DEBUG 0
++#define MY_DEBUG 1
++
++/*BSM patch MACRO*/
++#define AUDIT_BSM 1
+ 
+ /* At task start time, the audit_state is set in the audit_context using
+    a per-task filter.  At syscall entry, the audit_state is augmented by
+diff -uprN -X linux-2.6.25-rc9-vanilla/Documentation/dontdiff linux-2.6.25-rc9-vanilla/kernel/audit_internal.h linux-2.6.25-rc9/kernel/audit_internal.h
+--- linux-2.6.25-rc9-vanilla/kernel/audit_internal.h	1970-01-01 02:00:00.000000000 +0200
++++ linux-2.6.25-rc9/kernel/audit_internal.h	2008-04-16 09:59:15.000000000 +0300
+@@ -0,0 +1,142 @@
++/*
++ * Copyright (c) 2005 Apple Computer, Inc.
++ * Copyright (c) 2005 SPARTA, Inc.
++ * Copyright (c) 2008 Matteo Michelini, Politecnico di Milano
++ * All rights reserved.
++ *
++ * This code was developed in part by Robert N. M. Watson, Senior Principal
++ * Scientist, SPARTA, Inc.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1.  Redistributions of source code must retain the above copyright
++ *     notice, this list of conditions and the following disclaimer.
++ * 2.  Redistributions in binary form must reproduce the above copyright
++ *     notice, this list of conditions and the following disclaimer in the
++ *     documentation and/or other materials provided with the distribution.
++ * 3.  Neither the name of Apple Computer, Inc. ("Apple") nor the names of
++ *     its contributors may be used to endorse or promote products derived
++ *     from this software without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE AND ITS CONTRIBUTORS "AS IS" AND ANY
++ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
++ * WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
++ * DISCLAIMED. IN NO EVENT SHALL APPLE OR ITS CONTRIBUTORS BE LIABLE FOR ANY
++ * DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
++ * (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
++ * LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
++ * ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
++ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
++ * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++ *
++ * P4: //depot/projects/trustedbsd/audit3/sys/bsm/audit_internal.h#18
++ * $FreeBSD: src/sys/bsm/audit_internal.h,v 1.8 2007/07/22 12:28:12 rwatson Exp $
++ */
++
++#if defined(__linux__) && !defined(__unused)
++#define	__unused
++#endif
++
++/*
++ * audit_internal.h contains private interfaces that are shared by user space
++ * and the kernel for the purposes of assembling audit records.  Applications
++ * should not include this file or use the APIs found within, or it may be
++ * broken with future releases of OpenBSM, which may delete, modify, or
++ * otherwise break these interfaces or the assumptions they rely on.
++ */
++struct au_token {
++	u_char			*t_data;
++	size_t			 len;
++	struct list_head	 tokens;
++};
++
++struct au_record {
++	char			 used;		/* Record currently in use? */
++	int			 desc;		/* Descriptor for record. */
++//	TAILQ_HEAD(, au_token)	 token_q;	/* Queue of BSM tokens. */
++	u_char			*data;
++	size_t			 len;
++//	LIST_ENTRY(au_record)	 au_rec_q;
++};
++typedef	struct au_record	au_record_t;
++
++
++/*
++ * We could determined the header and trailer sizes by defining appropriate
++ * structures.  We hold off that approach until we have a consistent way of
++ * using structures for all tokens.  This is not straightforward since these
++ * token structures may contain pointers of whose contents we do not know the
++ * size (e.g text tokens).
++ */
++#define	AUDIT_HEADER_SIZE	18
++#define	AUDIT_TRAILER_SIZE	7
++
++/*
++ * BSM token streams store fields in big endian byte order, so as to be
++ * portable; when encoding and decoding, we must convert byte orders for
++ * typed values.
++ */
++#define	ADD_U_CHAR(loc, val)						\
++	do {								\
++		*(loc) = (val);						\
++		(loc) += sizeof(u_char);				\
++	} while(0)
++
++
++#define	ADD_U_INT16(loc, val)						\
++	do {								\
++		be16enc((loc), (val));					\
++		(loc) += sizeof(u_int16_t);				\
++	} while(0)
++
++#define	ADD_U_INT32(loc, val)						\
++	do {								\
++		be32enc((loc), (val));					\
++		(loc) += sizeof(u_int32_t);				\
++	} while(0)
++
++#define	ADD_U_INT64(loc, val)						\
++	do {								\
++		be64enc((loc), (val));					\
++		(loc) += sizeof(u_int64_t); 				\
++	} while(0)
++
++#define	ADD_MEM(loc, data, size)					\
++	do {								\
++		memcpy((loc), (data), (size));				\
++		(loc) += size;						\
++	} while(0)
++
++#define	ADD_STRING(loc, data, size)	ADD_MEM(loc, data, size)
++
++/*FIXME: on FreeBSD these are stored into sys/endian.h should we make
++ * a library to store them even on Linux systems?
++ * Are there already some func that do this work?*/
++static inline void be16enc(void *pp, uint16_t u)
++{
++	unsigned char *p = (unsigned char *)pp;
++	
++	p[0] = (u >> 8) & 0xff;
++	p[1] = u & 0xff;
++}
++
++static inline void be32enc(void *pp, uint32_t u)
++{
++	unsigned char *p = (unsigned char *)pp;
++	
++	p[0] = (u >> 24) & 0xff;
++	p[1] = (u >> 16) & 0xff;
++	p[2] = (u >> 8) & 0xff;
++	p[3] = u & 0xff;
++}
++
++static inline void be64enc(void *pp, uint64_t u)
++{
++	unsigned char *p = (unsigned char *)pp;
++
++	be32enc(p, u >> 32);
++	be32enc(p + 4,u & 0xffffffff);
++}
++
+diff -uprN -X linux-2.6.25-rc9-vanilla/Documentation/dontdiff linux-2.6.25-rc9-vanilla/kernel/auditsc.c linux-2.6.25-rc9/kernel/auditsc.c
+--- linux-2.6.25-rc9-vanilla/kernel/auditsc.c	2008-04-16 00:35:34.000000000 +0300
++++ linux-2.6.25-rc9/kernel/auditsc.c	2008-04-16 18:19:57.000000000 +0300
+@@ -69,6 +69,12 @@
+ 
+ #include "audit.h"
+ 
++/*including things such as ADD_U_CHAR ADD_U_INT32*/
++#ifdef AUDIT_BSM
++#include <linux/list.h>
++#include "audit_internal.h"
++#endif
++
+ extern struct list_head audit_filter_list[];
+ extern int audit_ever_enabled;
+ 
+@@ -236,6 +242,21 @@ struct audit_context {
+ #endif
+ };
+ 
++#ifdef AUDIT_BSM
++
++#define AUT_SUBJECT32 	0x24
++struct au_token *au_to_subject32(uid_t euid, gid_t egid, uid_t uid, 
++		gid_t gid, pid_t pid, unsigned int sessionid, char* tty);
++
++#define GET_TOKEN_AREA(t, dptr, length) do{		\
++	t = kmalloc(sizeof(struct au_token), GFP_KERNEL);	\
++	t->t_data = kmalloc(length, GFP_KERNEL);	\
++	t->len = length;				\
++	dptr = t->t_data;				\
++}while(0)
++
++#endif
++
+ #define ACC_MODE(x) ("\004\002\006\006"[(x)&O_ACCMODE])
+ static inline int open_arg(int flags, int mask)
+ {
+@@ -1150,8 +1171,49 @@ static void audit_log_execve_info(struct
+ 	kfree(buf);
+ }
+ 
++#ifdef AUDIT_BSM
++
++/*FIXME:
++ * token ID		OK: AUT_SUBJECT32
++ * audit ID		probably uid_t target_auid?
++ * effective user ID	OK: euid
++ * effective group ID	OK: egid
++ * real user ID		OK: uid
++ * real group ID	OK: gid
++ * process ID		OK: pid
++ * session ID		OK: sessionid
++ * terminal ID		probably tty? it's a char. In BSM it's ADD_U_INT32
++ */
++
++struct au_token *au_to_subject32(uid_t euid, gid_t egid, uid_t uid, gid_t gid, 
++				pid_t pid, unsigned int sessionid, char* tty)
++{
++	struct au_token* t;
++	u_char *dptr = NULL;
++
++	GET_TOKEN_AREA(t, dptr, sizeof(u_char) + 9 * sizeof(u_int32_t));
++
++	/*FIXME: add header file with all AUT_*: bsm/audit_record.h */
++	ADD_U_CHAR(dptr,AUT_SUBJECT32);
++	//ADD_U_INT32(dptr, auid);
++	ADD_U_INT32(dptr, euid);
++	ADD_U_INT32(dptr, egid);
++	ADD_U_INT32(dptr, uid);
++	ADD_U_INT32(dptr, gid);
++	ADD_U_INT32(dptr, pid);
++	ADD_U_INT32(dptr, sessionid);
++	//ADD terminal ID 
++	return t;
++}
++
++#endif
++
+ static void audit_log_exit(struct audit_context *context, struct task_struct *tsk)
+ {
++
++#ifdef AUDIT_BSM
++	struct au_token *subj_tok;
++#endif
+ 	int i, call_panic = 0;
+ 	struct audit_buffer *ab;
+ 	struct audit_aux_data *aux;
+@@ -1171,6 +1233,12 @@ static void audit_log_exit(struct audit_
+ 	context->fsgid = tsk->fsgid;
+ 	context->personality = tsk->personality;
+ 
++//#ifdef AUDIT_BSM
++//	subj_tok = au_to_subject32(context->euid, context->egid, context->uid,
++//					context->gid, context->pid);
++//
++//#endif
++
+ 	ab = audit_log_start(context, GFP_KERNEL, AUDIT_SYSCALL);
+ 	if (!ab)
+ 		return;		/* audit_panic has been called */
+@@ -1190,6 +1258,10 @@ static void audit_log_exit(struct audit_
+ 	else
+ 		tty = "(none)";
+ 	read_unlock(&tasklist_lock);
++#ifdef AUDIT_BSM
++	subj_tok = au_to_subject32(context->euid, context->egid, context->uid,
++				context->gid, context->pid, tsk->sessionid, tty);
++#endif
+ 	audit_log_format(ab,
+ 		  " a0=%lx a1=%lx a2=%lx a3=%lx items=%d"
+ 		  " ppid=%d pid=%d auid=%u uid=%u gid=%u"
+@@ -1228,6 +1300,14 @@ static void audit_log_exit(struct audit_
+ 		switch (aux->type) {
+ 		case AUDIT_MQ_OPEN: {
+ 			struct audit_aux_data_mq_open *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_MQ_OPEN: "
++                                "oflag=0x%x mode=%#o mq_flags=0x%lx mq_maxmsg=%ld "
++                                "mq_msgsize=%ld mq_curmsgs=%ld",
++                                axi->oflag, axi->mode, axi->attr.mq_flags,
++                                axi->attr.mq_maxmsg, axi->attr.mq_msgsize,
++                                axi->attr.mq_curmsgs);
++#endif
+ 			audit_log_format(ab,
+ 				"oflag=0x%x mode=%#o mq_flags=0x%lx mq_maxmsg=%ld "
+ 				"mq_msgsize=%ld mq_curmsgs=%ld",
+@@ -1238,6 +1318,13 @@ static void audit_log_exit(struct audit_
+ 
+ 		case AUDIT_MQ_SENDRECV: {
+ 			struct audit_aux_data_mq_sendrecv *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_MQ_SENDRECV: "
++                                "mqdes=%d msg_len=%zd msg_prio=%u "
++                                "abs_timeout_sec=%ld abs_timeout_nsec=%ld",
++                               axi->mqdes, axi->msg_len, axi->msg_prio,
++                               axi->abs_timeout.tv_sec, axi->abs_timeout.tv_nsec);
++#endif
+ 			audit_log_format(ab,
+ 				"mqdes=%d msg_len=%zd msg_prio=%u "
+ 				"abs_timeout_sec=%ld abs_timeout_nsec=%ld",
+@@ -1247,6 +1334,12 @@ static void audit_log_exit(struct audit_
+ 
+ 		case AUDIT_MQ_NOTIFY: {
+ 			struct audit_aux_data_mq_notify *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_MQ_NOTIFY: "
++                                "mqdes=%d sigev_signo=%d",
++                                axi->mqdes,
++                                axi->notification.sigev_signo);
++#endif
+ 			audit_log_format(ab,
+ 				"mqdes=%d sigev_signo=%d",
+ 				axi->mqdes,
+@@ -1255,6 +1348,14 @@ static void audit_log_exit(struct audit_
+ 
+ 		case AUDIT_MQ_GETSETATTR: {
+ 			struct audit_aux_data_mq_getsetattr *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_MQ_GETSETATTR: "
++                                "mqdes=%d mq_flags=0x%lx mq_maxmsg=%ld mq_msgsize=%ld "
++                                "mq_curmsgs=%ld ",
++                                axi->mqdes,
++                               axi->mqstat.mq_flags, axi->mqstat.mq_maxmsg,
++                            axi->mqstat.mq_msgsize, axi->mqstat.mq_curmsgs);
++#endif
+ 			audit_log_format(ab,
+ 				"mqdes=%d mq_flags=0x%lx mq_maxmsg=%ld mq_msgsize=%ld "
+ 				"mq_curmsgs=%ld ",
+@@ -1265,6 +1366,11 @@ static void audit_log_exit(struct audit_
+ 
+ 		case AUDIT_IPC: {
+ 			struct audit_aux_data_ipcctl *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_IPC: "
++                                "ouid=%u ogid=%u mode=%#o",
++                                 axi->uid, axi->gid, axi->mode);
++#endif
+ 			audit_log_format(ab, 
+ 				 "ouid=%u ogid=%u mode=%#o",
+ 				 axi->uid, axi->gid, axi->mode);
+@@ -1284,6 +1390,11 @@ static void audit_log_exit(struct audit_
+ 
+ 		case AUDIT_IPC_SET_PERM: {
+ 			struct audit_aux_data_ipcctl *axi = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_IPC_SET_PERM: "
++                               "qbytes=%lx ouid=%u ogid=%u mode=%#o",
++                              axi->qbytes, axi->uid, axi->gid, axi->mode);
++#endif
+ 			audit_log_format(ab,
+ 				"qbytes=%lx ouid=%u ogid=%u mode=%#o",
+ 				axi->qbytes, axi->uid, axi->gid, axi->mode);
+@@ -1297,20 +1408,33 @@ static void audit_log_exit(struct audit_
+ 		case AUDIT_SOCKETCALL: {
+ 			int i;
+ 			struct audit_aux_data_socketcall *axs = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_SOCKETCALL: nargs=%d", axs->nargs);
++#endif
+ 			audit_log_format(ab, "nargs=%d", axs->nargs);
+-			for (i=0; i<axs->nargs; i++)
++			for (i=0; i<axs->nargs; i++){
+ 				audit_log_format(ab, " a%d=%lx", i, axs->args[i]);
++#ifdef MY_DEBUG
++				printk(KERN_ERR "AUDIT_SOCKETCALL: a%d=%lx",i,axs->args[i]);		
++#endif
++			}
+ 			break; }
+ 
+ 		case AUDIT_SOCKADDR: {
+ 			struct audit_aux_data_sockaddr *axs = (void *)aux;
+-
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_SOCKADDR: saddr=%s",axs->a);
++#endif
+ 			audit_log_format(ab, "saddr=");
+ 			audit_log_hex(ab, axs->a, axs->len);
+ 			break; }
+ 
+ 		case AUDIT_FD_PAIR: {
+ 			struct audit_aux_data_fd_pair *axs = (void *)aux;
++#ifdef MY_DEBUG
++			printk(KERN_ERR "AUDIT_FD_PAIR: "
++				"fd0=%d fd1=%d", axs->fd[0], axs->fd[1]);
++#endif
+ 			audit_log_format(ab, "fd0=%d fd1=%d", axs->fd[0], axs->fd[1]);
+ 			break; }
+ 
